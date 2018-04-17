@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"image"
+	"image/color"
+	"io/ioutil"
 	"log"
-	"os"
 	"path/filepath"
+	"strings"
 
 	vision "cloud.google.com/go/vision/apiv1"
 	"github.com/otiai10/gosseract"
@@ -39,6 +42,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	_ = client
 
 	templates, err := filepath.Glob(templateGlob)
 	if err != nil {
@@ -53,7 +57,13 @@ func run() error {
 		}
 		defer im.Close()
 
-		tmpls[filepath.Base(tmpl)] = im
+		name := strings.Split(filepath.Base(tmpl), ".")[0]
+		tmpls[name] = im
+
+		small := gocv.NewMat()
+		defer small.Close()
+		gocv.Resize(im, &small, image.Point{int(float64(im.Cols()) * smallFactor), int(float64(im.Rows()) * smallFactor)}, 0, 0, gocv.InterpolationDefault)
+		tmpls[name+"-sm"] = small
 	}
 
 	examples, err := filepath.Glob(exampleGlob)
@@ -69,20 +79,25 @@ func run() error {
 
 		gocv.Resize(im, &im, image.Point{1920, 1080}, 0, 0, gocv.InterpolationDefault)
 
-		file, err := os.Open(ex)
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-		image, err := vision.NewImageFromReader(file)
-		if err != nil {
-			return err
-		}
-		annotations, err := client.DetectTexts(ctx, image, nil, 1000)
-		if err != nil {
-			return err
-		}
-		log.Printf("%s: Annotations: %+v", filepath.Base(ex), annotations)
+		out := im.Clone()
+		defer out.Close()
+
+		/*
+			file, err := os.Open(ex)
+			if err != nil {
+				return err
+			}
+			defer file.Close()
+			image, err := vision.NewImageFromReader(file)
+			if err != nil {
+				return err
+			}
+			annotations, err := client.DetectTexts(ctx, image, nil, 1000)
+			if err != nil {
+				return err
+			}
+			log.Printf("%s: Annotations: %+v", filepath.Base(ex), annotations)
+		*/
 
 		/*
 			largeBytes, err := gocv.IMEncode(gocv.PNGFileExt, im)
@@ -102,10 +117,21 @@ func run() error {
 			result := gocv.NewMat()
 			defer result.Close()
 			gocv.MatchTemplate(im, tmpl, &result, gocv.TmCcoeffNormed, gocv.NewMat())
-			_, maxConfidence, _, _ := gocv.MinMaxLoc(result)
+			_, maxConfidence, _, maxLoc := gocv.MinMaxLoc(result)
 			if maxConfidence > 0.85 {
 				log.Printf("%s: %s - confidence %f", filepath.Base(ex), tmplName, maxConfidence)
+				gocv.PutText(&out, tmplName, maxLoc, gocv.FontHersheySimplex, 1, color.RGBA{255, 255, 255, 255}, 2)
 			}
+		}
+
+		bytes, err := gocv.IMEncode(gocv.PNGFileExt, out)
+		if err != nil {
+			return err
+		}
+		path := fmt.Sprintf("/tmp/%s", filepath.Base(ex))
+		log.Printf("writing to %s", path)
+		if err := ioutil.WriteFile(path, bytes, 0755); err != nil {
+			return err
 		}
 	}
 
